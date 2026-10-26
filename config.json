@@ -1,0 +1,26 @@
+{
+  "site_name": "알파시그널AI",
+  "site_url": "https://alpha-signalai.github.io",
+  "base_path": "",
+  "sheet_url": "https://script.google.com/macros/s/AKfycbyFVUspFhkWK2NVH2eMm90bs9zhJxEoFB5FVcIB7O-T9f6VvPwl7MvpZwO6SN8GHTjjBA/exec",
+  "kakao_url": "",
+  "phone": "",
+  "phone_hours": "평일 09:00–18:00",
+  "reply_days": "1",
+  "biz_info": "상호 미라클투자그룹(주) · 대표이사 이건희 · 주소 서울 강남구 테헤란로7길 11 7층",
+  "privacy_owner": "미라클투자그룹(주)",
+  "privacy_officer": "성명: [성명] · 직책: [직책] · 연락처: [전화번호] · 이메일: [이메일]",
+  "privacy_effective_date": "[YYYY년 MM월 DD일]",
+  "hosting_company": "GitHub, Inc.",
+  "google_site_verification": "",
+  "naver_site_verification": "",
+  "markets": [
+    "KOSPI",
+    "KOSDAQ"
+  ],
+  "min_marcap": 0,
+  "exclude_name_regex": "스팩|리츠$",
+  "history_days": 550,
+  "workers": 8,
+  "tagline": "AI 주가예측 무료"
+}

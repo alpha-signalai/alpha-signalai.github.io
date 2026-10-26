@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% from "_macros.html" import ud, hook_cards %}
+{% set d = bigcaps[0] %}
+{% block title %}{{ cfg.site_name }} | AI 주가예측 무료 — 코스피·코스닥 전 종목{% endblock %}
+{% block desc %}종목명만 입력하면 AI가 5거래일 뒤 상승 확률과 예상 가격 범위를 무료로 계산해 드립니다. 코스피·코스닥 {{ count }}개 전 종목, 매 거래일 장 마감 후 갱신.{% endblock %}
+{% block path %}/{% endblock %}
+{% block body_attr %} data-stock="{{ d.name }} ({{ d.code }})"{% endblock %}
+{% block head %}
+<script type="application/ld+json">{{ {"@context":"https://schema.org","@type":"WebSite","name":cfg.site_name,"url":site_url ~ "/"} | tojson }}</script>
+{% endblock %}
+{% block main %}
+<section class="hero tool-hero">
+  <div class="wrap tool-wrap">
+    <p class="hero-badges center"><span class="free-lg">100% 무료</span><span class="hero-chip">가입 없이 바로</span><span class="hero-chip">전 종목 {{ "{:,}".format(count) }}개</span></p>
+    <h1 class="serif center">종목만 입력하세요.<br>AI가 주가를 예측합니다.</h1>
+    <p class="lead center">머신러닝 AI가 매일 장 마감 후 전 종목을 다시 학습해 5거래일 뒤 상승 확률을 계산합니다.</p>
+
+    <form class="tool" data-tool role="search" action="{{ base }}/">
+      <label class="sr" for="tool-q">종목 검색</label>
+      <input id="tool-q" type="search" placeholder="종목명 또는 코드 (예: {{ d.name }}, {{ d.code }})" autocomplete="off">
+      <button type="submit" class="btn btn-accent btn-lg">AI 예측 돌리기</button>
+      <ul class="search-list" hidden></ul>
+    </form>
+
+    <div class="result" id="tool-result" aria-live="polite">
+      <div class="result-head">
+        <div>
+          <p class="result-name"><span data-r="name">{{ d.name }}</span> <span class="code" data-r="code">{{ d.code }}</span></p>
+          <p class="result-price"><b data-r="close">{{ d.close | price }}</b>원 <span data-r="chg" class="{{ ud(d.chg) }}">{{ d.chg | pct }}</span></p>
+        </div>
+        <span class="ai-badge lg">AI 기본 예측 · 5거래일</span>
+      </div>
+      <div class="result-grid">
+        <div class="ai-main">
+          <p class="ai-lbl">상승 확률</p>
+          <p class="ai-p {{ d.ai.cls }}" data-r="pbox"><span data-r="p">{% if d.ai.p is not none %}{{ '%.0f' | format(d.ai.p * 100) }}{% else %}-{% endif %}</span><small>%</small></p>
+          <p class="ai-signal {{ d.ai.cls }}" data-r="signal">{{ d.ai.signal or '데이터 부족' }}</p>
+          <div class="ai-meter" aria-hidden="true"><span data-r="meter" style="width: {{ '%.0f' | format((d.ai.p or 0.5) * 100) }}%"></span></div>
+        </div>
+        <div class="ai-range">
+          <p class="ai-lbl">예상 가격 범위</p>
+          <p class="ai-rng"><span class="down" data-r="lo">{{ d.ai.lo | price }}</span> ~ <span class="up" data-r="hi">{{ d.ai.hi | price }}</span>원</p>
+          <p class="ai-note">최근 변동성 기준 약 68% 확률 구간</p>
+          <a class="result-link" data-r="link" href="{{ base }}/stock/{{ d.code }}/">차트·시세 자세히 보기 ›</a>
+        </div>
+      </div>
+      <p class="ai-foot">{{ base_date }} 종가 기준 · 과거 데이터로 계산한 통계적 추정이며 미래 주가를 보장하지 않습니다.</p>
+    </div>
+  </div>
+</section>
+
+<section class="hooks-sec">
+  <div class="wrap">
+    <h2 class="center serif hooks-title">기본 예측으로 부족하다면</h2>
+    {{ hook_cards(base) }}
+    <p class="center hooks-links"><a href="{{ base }}/ai/">AI 예측 방법·정확도</a> · <a href="{{ base }}/market/kospi/">코스피 전 종목</a> · <a href="{{ base }}/market/kosdaq/">코스닥 전 종목</a></p>
+  </div>
+</section>
+{% endblock %}

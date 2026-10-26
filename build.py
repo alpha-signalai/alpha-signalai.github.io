@@ -1,0 +1,571 @@
+# -*- coding: utf-8 -*-
+"""
+알파시그널AI — 종목별 페이지 자동 생성기
+
+  python build.py            # 실제 데이터로 전체 사이트 생성 → site/ 폴더
+  python build.py --limit 50 # 시가총액 상위 50종목만 (빠른 테스트)
+  python build.py --demo     # 인터넷 없이 가짜 샘플 데이터로 화면만 확인
+
+데이터: 1순위 FinanceDataReader(네이버·KRX), 실패하면 2순위 다음 금융.
+"""
+import argparse, json, math, os, random, re, shutil, sys, time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pandas as pd
+from jinja2 import Environment, FileSystemLoader, select_autoescape
+
+ROOT = Path(__file__).resolve().parent
+OUT = ROOT / "site"
+KST = timezone(timedelta(hours=9))
+CFG = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
+
+DAUM_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
+    "Referer": "https://finance.daum.net/",
+    "Accept": "application/json",
+}
+
+
+def log(*a):
+    print(datetime.now(KST).strftime("%H:%M:%S"), *a, flush=True)
+
+
+# ════════════════════════ 1. 데이터 수집 ════════════════════════
+
+def listing_fdr():
+    import FinanceDataReader as fdr
+    df = fdr.StockListing("KRX")
+    df = df.rename(columns={"Code": "code", "Name": "name", "Market": "market", "Marcap": "marcap", "Stocks": "shares"})
+    df["market"] = df["market"].replace({"KOSDAQ GLOBAL": "KOSDAQ"})
+    df = df[["code", "name", "market", "marcap", "shares"]]
+    try:  # 업종 정보 (실패해도 진행)
+        desc = fdr.StockListing("KRX-DESC").rename(columns={"Code": "code", "Sector": "sector", "Industry": "industry"})
+        df = df.merge(desc[["code", "sector", "industry"]], on="code", how="left")
+    except Exception as e:
+        log("업종 정보 생략:", e)
+    return df
+
+
+def listing_daum():
+    import requests
+    rows = []
+    for m in CFG["markets"]:
+        for p in range(1, 15):
+            url = f"https://finance.daum.net/api/trend/market_capitalization?page={p}&perPage=200&fieldName=marketCap&order=desc&market={m}&pagination=true"
+            j = requests.get(url, headers=DAUM_HEADERS, timeout=15).json()
+            data = j.get("data") or []
+            for d in data:
+                rows.append({"code": d["symbolCode"][1:], "name": d["name"], "market": m,
+                             "marcap": d.get("marketCap"), "shares": d.get("listedShareCount")})
+            if len(data) < 200:
+                break
+    return pd.DataFrame(rows)
+
+
+def get_listing():
+    for fn in (listing_fdr, listing_daum):
+        try:
+            df = fn()
+            if len(df) > 500:
+                log(f"종목 목록: {fn.__name__} → {len(df)}개")
+                return df
+        except Exception as e:
+            log(f"{fn.__name__} 실패:", e)
+    sys.exit("종목 목록을 가져오지 못했습니다.")
+
+
+def hist_fdr(code, start):
+    import FinanceDataReader as fdr
+    df = fdr.DataReader(code, start)
+    return df[["Open", "High", "Low", "Close", "Volume"]]
+
+
+def hist_daum(code, start):
+    import requests
+    rows, sym = [], "A" + code
+    for p in range(1, 5):
+        url = f"https://finance.daum.net/api/quote/{sym}/days?symbolCode={sym}&page={p}&perPage=100&pagination=true"
+        data = requests.get(url, headers=DAUM_HEADERS, timeout=15).json().get("data") or []
+        for d in data:
+            rows.append({"Date": d["date"][:10], "Open": d["openingPrice"], "High": d["highPrice"],
+                         "Low": d["lowPrice"], "Close": d["tradePrice"], "Volume": d["accTradeVolume"]})
+        if len(data) < 100 or (data and data[-1]["date"][:10] < start):
+            break
+    df = pd.DataFrame(rows)
+    df["Date"] = pd.to_datetime(df["Date"])
+    return df.set_index("Date").sort_index()
+
+
+def get_history(code, start):
+    for fn in (hist_fdr, hist_daum):
+        for attempt in range(2):
+            try:
+                df = fn(code, start)
+                df = df[df["Volume"] > 0].dropna()
+                if len(df) >= 2:
+                    return df
+            except Exception:
+                time.sleep(0.5 + attempt)
+    return None
+
+
+# ════════════════════════ 데모 데이터 (테스트 전용) ════════════════════════
+
+def demo_data(n=40):
+    """실제 회사가 아닌 가짜 종목. 화면 확인용."""
+    random.seed(7)
+    sectors = ["반도체", "2차전지", "바이오", "자동차부품", "게임", "조선"]
+    lst, hist = [], {}
+    end = datetime.now(KST).date()
+    days = pd.bdate_range(end=end, periods=260)
+    for i in range(n):
+        code = f"9{i:05d}"
+        price = random.choice([3000, 12000, 45000, 180000])
+        o = []
+        for d in days:
+            ch = random.gauss(0.0006, 0.022)
+            op = price * (1 + random.gauss(0, 0.008))
+            cl = max(100, op * (1 + ch))
+            hi, lo = max(op, cl) * (1 + abs(random.gauss(0, 0.01))), min(op, cl) * (1 - abs(random.gauss(0, 0.01)))
+            vol = int(abs(random.gauss(1, 0.4)) * 300000 * (3 if random.random() < 0.03 else 1))
+            o.append([d, round(op), round(hi), round(lo), round(cl), vol])
+            price = cl
+        df = pd.DataFrame(o, columns=["Date", "Open", "High", "Low", "Close", "Volume"]).set_index("Date")
+        shares = random.choice([5e6, 2e7, 8e7])
+        lst.append({"code": code, "name": f"샘플종목{i+1:02d}", "market": "KOSPI" if i % 2 else "KOSDAQ",
+                    "marcap": df.Close.iloc[-1] * shares, "shares": shares, "sector": sectors[i % len(sectors)]})
+        hist[code] = df
+    return pd.DataFrame(lst), hist
+
+
+# ════════════════════════ 2. 지표 계산 ════════════════════════
+
+def pct(a, b):
+    return (a / b - 1) * 100 if b else None
+
+
+def compute(row, df):
+    df = df.tail(260)
+    last, prev = df.iloc[-1], df.iloc[-2]
+    c = float(last.Close)
+    y = df.tail(250)
+    hi52, lo52 = float(y.High.max()), float(y.Low.min())
+    vol20 = float(df.Volume.iloc[-21:-1].mean()) if len(df) > 21 else None
+
+    def ret(n):
+        return pct(c, float(df.Close.iloc[-n - 1])) if len(df) > n else None
+
+    shares = row.get("shares")
+    marcap = row.get("marcap")
+    if (not marcap or pd.isna(marcap)) and shares:
+        marcap = c * shares
+
+    recent = []
+    rd = df.tail(11)
+    for i in range(len(rd) - 1, 0, -1):
+        r, p = rd.iloc[i], rd.iloc[i - 1]
+        recent.append({"date": rd.index[i].strftime("%m.%d"), "close": float(r.Close),
+                       "chg": pct(float(r.Close), float(p.Close)), "volume": int(r.Volume)})
+
+    sector = row.get("sector")
+    sector = sector if isinstance(sector, str) and sector.strip() else None
+    return {
+        "code": row["code"], "name": row["name"], "market": row["market"],
+        "sector": sector,
+        "date": df.index[-1].strftime("%Y-%m-%d"),
+        "date_kr": f"{df.index[-1].month}월 {df.index[-1].day}일",
+        "open": float(last.Open), "high": float(last.High), "low": float(last.Low), "close": c,
+        "prev": float(prev.Close), "change": c - float(prev.Close), "chg": pct(c, float(prev.Close)),
+        "volume": int(last.Volume), "amount": c * float(last.Volume),
+        "vol_ratio": (float(last.Volume) / vol20) if vol20 else None,
+        "marcap": float(marcap) if marcap and not pd.isna(marcap) else None,
+        "shares": float(shares) if shares and not pd.isna(shares) else None,
+        "hi52": hi52, "lo52": lo52,
+        "from_hi": pct(c, hi52), "from_lo": pct(c, lo52),
+        "r1w": ret(5), "r1m": ret(20), "r3m": ret(60), "r6m": ret(120), "r1y": ret(245),
+        "recent": recent,
+        "chart": chart_svg(df.tail(120)),
+    }
+
+
+# ════════════════════════ 3. 차트 (서버에서 SVG로 그림) ════════════════════════
+
+def chart_svg(df, W=760, H=320):
+    n = len(df)
+    pad_l, pad_r, pad_t = 8, 64, 12
+    ph, vh, gap = 210, 56, 22
+    cw = (W - pad_l - pad_r) / n
+    hi, lo = float(df.High.max()), float(df.Low.min())
+    rng = (hi - lo) or 1
+    vmax = float(df.Volume.max()) or 1
+    Y = lambda v: pad_t + (hi - v) / rng * ph
+    vy0 = pad_t + ph + gap
+    parts = []
+    # 가로 눈금
+    for k in range(5):
+        v = lo + rng * k / 4
+        yy = Y(v)
+        parts.append(f'<line x1="{pad_l}" x2="{W-pad_r}" y1="{yy:.1f}" y2="{yy:.1f}" class="g"/>'
+                     f'<text x="{W-pad_r+6}" y="{yy+4:.1f}" class="t">{fmt_price(v)}</text>')
+    for i, (d, r) in enumerate(df.iterrows()):
+        x = pad_l + i * cw + cw / 2
+        up = r.Close >= r.Open
+        cls = "u" if up else "d"
+        top, bot = Y(max(r.Open, r.Close)), Y(min(r.Open, r.Close))
+        bw = max(1.0, cw * 0.62)
+        parts.append(f'<line x1="{x:.1f}" x2="{x:.1f}" y1="{Y(r.High):.1f}" y2="{Y(r.Low):.1f}" class="{cls}"/>'
+                     f'<rect x="{x-bw/2:.1f}" y="{top:.1f}" width="{bw:.1f}" height="{max(1, bot-top):.1f}" class="{cls}"/>')
+        vhgt = r.Volume / vmax * vh
+        parts.append(f'<rect x="{x-bw/2:.1f}" y="{vy0+vh-vhgt:.1f}" width="{bw:.1f}" height="{max(0.5, vhgt):.1f}" class="v{cls}"/>')
+    for i in (0, n // 2, n - 1):
+        x = pad_l + i * cw + cw / 2
+        anchor = "start" if i == 0 else "end" if i == n - 1 else "middle"
+        parts.append(f'<text x="{x:.1f}" y="{H-4}" class="t" text-anchor="{anchor}">{df.index[i].strftime("%y.%m.%d")}</text>')
+    return (f'<svg viewBox="0 0 {W} {H}" class="chart" role="img" aria-label="최근 {n}거래일 일봉 차트와 거래량">'
+            + "".join(parts) + "</svg>")
+
+
+# ════════════════════════ 4. 문장 자동 생성 ════════════════════════
+
+def fmt_price(v):
+    return f"{v:,.0f}"
+
+
+def fmt_won(v):
+    if v is None:
+        return "-"
+    if v >= 1e12:
+        jo, eok = divmod(round(v / 1e8), 10000)
+        return f"{jo:,}조 {eok:,}억원" if eok else f"{jo:,}조원"
+    if v >= 1e8:
+        return f"{v/1e8:,.0f}억원"
+    return f"{v/1e4:,.0f}만원"
+
+
+def fmt_pct(v, sign=True):
+    if v is None:
+        return "-"
+    return f"{v:+.2f}%" if sign else f"{v:.2f}%"
+
+
+def josa(word, a="은", b="는"):
+    ch = word.strip()[-1:] if word else ""
+    if "가" <= ch <= "힣":
+        return word + (a if (ord(ch) - 0xAC00) % 28 else b)
+    return f"{word}{a}({b})"
+
+
+def summary(s):
+    nm, out = s["name"], []
+    nm_t = josa(nm)
+    if s["chg"] is None or abs(s["chg"]) < 0.005:
+        out.append(f"{nm_t} {s['date_kr']} {fmt_price(s['close'])}원에 거래를 마치며 전일과 같은 가격을 유지했습니다.")
+    else:
+        word = "상승" if s["chg"] > 0 else "하락"
+        out.append(f"{nm_t} {s['date_kr']} 전일보다 {fmt_price(abs(s['change']))}원({abs(s['chg']):.2f}%) {word}한 "
+                   f"{fmt_price(s['close'])}원에 거래를 마쳤습니다.")
+    if s["marcap"]:
+        out.append(f"종가 기준 시가총액은 {fmt_won(s['marcap'])}입니다.")
+    if s["vol_ratio"]:
+        vr = s["vol_ratio"]
+        if vr >= 2:
+            out.append(f"거래량은 {s['volume']:,}주로 최근 20거래일 평균의 {vr:.1f}배까지 늘었습니다.")
+        elif vr <= 0.6:
+            out.append(f"거래량은 {s['volume']:,}주로 최근 20거래일 평균보다 적었습니다.")
+        else:
+            out.append(f"거래량은 {s['volume']:,}주로 최근 20거래일 평균과 비슷한 수준입니다.")
+    if s["r1m"] is not None:
+        r = s["r1m"]
+        out.append(f"최근 1개월 동안 주가는 {abs(r):.1f}% {'올랐' if r >= 0 else '내렸'}고, "
+                   + (f"3개월 기준으로는 {fmt_pct(s['r3m'])}입니다." if s["r3m"] is not None else "") )
+    if s["from_hi"] is not None:
+        if s["from_hi"] > -1:
+            out.append(f"현재 주가는 52주 최고가({fmt_price(s['hi52'])}원) 부근에 있습니다.")
+        else:
+            out.append(f"현재 주가는 52주 최고가 {fmt_price(s['hi52'])}원보다 {abs(s['from_hi']):.1f}% 낮고, "
+                       f"52주 최저가 {fmt_price(s['lo52'])}원보다는 {s['from_lo']:.1f}% 높은 위치입니다.")
+    return out
+
+
+def faqs(s):
+    nm = s["name"]
+    q = [
+        (f"{nm} 오늘 주가는 얼마인가요?",
+         f"{s['date_kr']} 종가는 {fmt_price(s['close'])}원으로, 전일 대비 {fmt_pct(s['chg'])} 움직였습니다."),
+        (f"{nm} 종목코드는 무엇인가요?",
+         f"{nm}의 종목코드는 {s['code']}이며 {s['market']}에 상장되어 있습니다."),
+        (f"{nm} 52주 최고가와 최저가는?",
+         f"최근 52주 최고가는 {fmt_price(s['hi52'])}원, 최저가는 {fmt_price(s['lo52'])}원입니다."),
+        (f"{nm} 시가총액은 얼마인가요?",
+         f"{s['date_kr']} 종가 기준 시가총액은 {fmt_won(s['marcap'])}입니다." if s["marcap"] else "시가총액 정보가 없습니다."),
+    ]
+    ai = s.get("ai") or {}
+    if ai.get("p") is not None:
+        q.insert(1, (f"{nm} 주가 예측은 어떻게 나오나요?",
+                     f"{CFG['site_name']} AI 모델이 계산한 {nm}의 5거래일 뒤 상승 확률은 {ai['p']*100:.0f}%({ai['signal']})이며, "
+                     f"최근 변동성 기준 예상 가격 범위는 {fmt_price(ai['lo'])}원~{fmt_price(ai['hi'])}원입니다. "
+                     f"과거 데이터로 계산한 통계적 추정이며 실제 주가와 다를 수 있습니다. AI 예측은 전 종목 무료로 제공됩니다."))
+    return q
+
+
+# ════════════════════════ 5. 페이지 생성 ════════════════════════
+
+def slug(text):
+    return re.sub(r"[^0-9A-Za-z가-힣]+", "-", text).strip("-")
+
+
+def build(stocks, base_date):
+    if OUT.exists():
+        shutil.rmtree(OUT)
+    (OUT / "assets").mkdir(parents=True)
+    for f in (ROOT / "static").iterdir():
+        shutil.copy(f, OUT / "assets" / f.name)
+
+    env = Environment(loader=FileSystemLoader(ROOT / "templates"), autoescape=select_autoescape(["html"]))
+    env.filters.update(price=fmt_price, won=fmt_won, pct=fmt_pct, slug=slug)
+    base = CFG["base_path"].rstrip("/")
+    site_url = CFG["site_url"].rstrip("/") + base
+    public_cfg = {k: CFG[k] for k in ("sheet_url", "kakao_url", "phone", "phone_hours", "biz_info")}
+    common = {"cfg": CFG, "base": base, "site_url": site_url, "base_date": base_date,
+              "public_cfg": json.dumps(public_cfg, ensure_ascii=False),
+              "year": datetime.now(KST).year, "ai_report": MODEL_INFO["report"]}
+
+    def write(out_path, tpl, **ctx):
+        p = OUT / out_path
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(env.get_template(tpl).render(**common, **ctx), encoding="utf-8")
+
+    stocks = sorted(stocks, key=lambda s: -(s["marcap"] or 0))
+    rank = {s["code"]: i for i, s in enumerate(stocks)}
+    by_sector, by_market = {}, {}
+    for s in stocks:
+        by_market.setdefault(s["market"], []).append(s)
+        if s["sector"]:
+            by_sector.setdefault(s["sector"], []).append(s)
+
+    urls = [("/", "1.0"), ("/ai/", "0.9"), ("/market/kospi/", "0.8"), ("/market/kosdaq/", "0.8"), ("/privacy/", "0.2")]
+
+    # 종목 페이지
+    for s in stocks:
+        peers = []
+        if s["sector"] and len(by_sector[s["sector"]]) > 1:
+            peers = [p for p in by_sector[s["sector"]] if p["code"] != s["code"]][:8]
+        if len(peers) < 8:
+            mk = by_market[s["market"]]
+            i = mk.index(s)
+            near = mk[max(0, i - 6): i] + mk[i + 1: i + 7]
+            peers += [p for p in near if p not in peers][: 8 - len(peers)]
+        write(f"stock/{s['code']}/index.html", "stock.html", s=s, peers=peers,
+              summary=summary(s), faqs=faqs(s), rank=rank[s["code"]] + 1, total=len(stocks),
+              sector_slug=slug(s["sector"]) if s["sector"] and len(by_sector.get(s["sector"], [])) >= 3 else None)
+        urls.append((f"/stock/{s['code']}/", "0.7"))
+
+    # 업종 페이지 (3종목 이상)
+    sectors = sorted([(k, v) for k, v in by_sector.items() if len(v) >= 3], key=lambda kv: -len(kv[1]))
+    for name, lst in sectors:
+        write(f"sector/{slug(name)}/index.html", "list.html", title=f"{name} 관련주", heading=f"{name} 업종 종목",
+              desc=f"{name} 업종 {len(lst)}개 종목의 {base_date} 주가, 등락률, 시가총액을 한눈에 확인하세요.",
+              items=lst, path=f"/sector/{slug(name)}/")
+        urls.append((f"/sector/{slug(name)}/", "0.6"))
+
+    # 시장 목록
+    for m in ("KOSPI", "KOSDAQ"):
+        lst = by_market.get(m, [])
+        name = "코스피" if m == "KOSPI" else "코스닥"
+        write(f"market/{m.lower()}/index.html", "list.html", title=f"{name} 전 종목 시세", heading=f"{name} 전 종목",
+              desc=f"{name} 상장 {len(lst)}개 종목의 {base_date} 종가, 등락률, 시가총액 순위.",
+              items=lst, path=f"/market/{m.lower()}/")
+
+    # 메인
+    def top(key, rev=True, n=10, flt=None):
+        pool = [s for s in stocks if s[key] is not None and (flt is None or flt(s))]
+        return sorted(pool, key=lambda s: s[key], reverse=rev)[:n]
+    liquid = lambda s: s["amount"] >= 1e9
+    ai_pool = [s for s in stocks if s["ai"].get("p") is not None and liquid(s)]
+    ai_up = sorted(ai_pool, key=lambda s: -s["ai"]["p"])[:10]
+    ai_down = sorted(ai_pool, key=lambda s: s["ai"]["p"])[:10]
+    write("index.html", "index.html",
+          gainers=top("chg", flt=liquid), losers=top("chg", rev=False, flt=liquid),
+          amount=top("amount"), bigcaps=stocks[:10], sectors=sectors[:24], count=len(stocks),
+          ai_up=ai_up, ai_down=ai_down)
+    write("ai/index.html", "ai.html", ai_up=ai_up, ai_down=ai_down, count=len(stocks))
+
+    write("privacy/index.html", "privacy.html")
+    write("404.html", "404.html")
+
+    # 검색용 목록, 사이트맵, robots
+    (OUT / "stocks.json").write_text(json.dumps([[s["code"], s["name"], s["market"], s["close"], round(s["chg"] or 0, 2),
+                    round(s["ai"]["p"], 3) if s["ai"].get("p") is not None else None,
+                    round(s["ai"]["lo"]), round(s["ai"]["hi"])] for s in stocks], ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    sm = ['<?xml version="1.0" encoding="UTF-8"?>', '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
+    sm += [f"<url><loc>{site_url}{u}</loc><lastmod>{base_date}</lastmod><priority>{p}</priority></url>" for u, p in urls]
+    sm.append("</urlset>")
+    (OUT / "sitemap.xml").write_text("\n".join(sm), encoding="utf-8")
+    (OUT / "robots.txt").write_text(f"User-agent: *\nAllow: /\nSitemap: {site_url}/sitemap.xml\n", encoding="utf-8")
+    (OUT / ".nojekyll").write_text("")
+    log(f"완료: 종목 {len(stocks)}개, 업종 {len(sectors)}개, 총 {len(urls)}개 URL → {OUT}")
+
+
+# ════════════════════════ 6. AI 주가예측 모델 ════════════════════════
+# 전 종목의 일봉에서 기술적 특징을 뽑아, "5거래일 뒤 종가가 오늘보다 높을까?"를
+# 맞히도록 로지스틱 회귀(머신러닝) 모델을 매일 새로 학습합니다.
+# 최근 60거래일은 학습에서 빼고 검증용으로 써서, 실제 정확도를 그대로 공개합니다.
+
+HORIZON = 5
+TEST_DAYS = 60
+FEATS = ["r1", "r5", "r20", "r60", "vol20", "vr", "hi_dist", "lo_dist", "rsi", "gap20", "gap60", "range5"]
+MODEL_INFO = {"report": None}
+
+
+def features(df):
+    c, v = df["Close"].astype(float), df["Volume"].astype(float)
+    ret = c.pct_change()
+    f = pd.DataFrame(index=df.index)
+    for n in (1, 5, 20, 60):
+        f[f"r{n}"] = c.pct_change(n)
+    f["vol20"] = ret.rolling(20).std()
+    f["vr"] = (v / v.rolling(20).mean().shift(1)).clip(0, 20).apply(lambda x: math.log1p(x) if pd.notna(x) else x)
+    f["hi_dist"] = c / df["High"].rolling(250, min_periods=60).max() - 1
+    f["lo_dist"] = c / df["Low"].rolling(250, min_periods=60).min() - 1
+    gain, loss = ret.clip(lower=0).rolling(14).mean(), (-ret.clip(upper=0)).rolling(14).mean()
+    f["rsi"] = (gain / (gain + loss)).fillna(0.5) - 0.5
+    f["gap20"] = c / c.rolling(20).mean() - 1
+    f["gap60"] = c / c.rolling(60).mean() - 1
+    f["range5"] = (df["High"].rolling(5).max() / df["Low"].rolling(5).min() - 1)
+    f["y"] = (c.shift(-HORIZON) > c).astype(float).where(c.shift(-HORIZON).notna())
+    return f.replace([float("inf"), float("-inf")], pd.NA)
+
+
+def train_model(dfs):
+    import numpy as np
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.metrics import roc_auc_score
+
+    frames = [features(d) for d in dfs if len(d) >= 80]
+    data = pd.concat(frames).dropna(subset=FEATS + ["y"])
+    dates = sorted(data.index.unique())
+    if len(dates) < TEST_DAYS + 40 or len(data) < 2000:
+        log("학습 데이터 부족 — AI 예측 생략")
+        return None, None
+    cut = dates[-TEST_DAYS]
+    train, test = data[data.index < cut], data[data.index >= cut]
+    if len(train) > 600_000:
+        train = train.sample(600_000, random_state=0)
+    clip = lambda X: X.astype(float).clip(-5, 5)
+    model = make_pipeline(StandardScaler(), LogisticRegression(C=0.5, max_iter=300))
+    model.fit(clip(train[FEATS]), train["y"])
+
+    p = model.predict_proba(clip(test[FEATS]))[:, 1]
+    y = test["y"].values
+    acc = float(((p >= 0.5) == (y == 1)).mean())
+    base = float(max(y.mean(), 1 - y.mean()))
+    strong = (p >= 0.6) | (p <= 0.4)
+    acc_strong = float(((p[strong] >= 0.5) == (y[strong] == 1)).mean()) if strong.sum() > 100 else None
+    try:
+        auc = float(roc_auc_score(y, p))
+    except Exception:
+        auc = None
+    top = p >= np.quantile(p, 0.9)
+    report = {
+        "train_rows": int(len(train)), "test_rows": int(len(test)),
+        "test_from": pd.Timestamp(cut).strftime("%Y-%m-%d"), "test_to": pd.Timestamp(dates[-1]).strftime("%Y-%m-%d"),
+        "acc": acc, "base": base, "acc_strong": acc_strong, "strong_share": float(strong.mean()), "auc": auc,
+        "top_up_rate": float(y[top].mean()), "all_up_rate": float(y.mean()),
+    }
+    log(f"AI 검증: 정확도 {acc:.1%} (기준 {base:.1%}), AUC {auc}, 상위10% 실제상승률 {report['top_up_rate']:.1%} vs 전체 {report['all_up_rate']:.1%}")
+
+    # 검증까지 끝난 뒤, 최신 데이터까지 포함해 다시 학습해서 오늘 예측에 사용
+    full = data if len(data) <= 600_000 else data.sample(600_000, random_state=0)
+    model.fit(clip(full[FEATS]), full["y"])
+    return model, report
+
+
+def predict(model, df):
+    c = float(df["Close"].iloc[-1])
+    sd = float(df["Close"].pct_change().tail(20).std() or 0)
+    band = sd * math.sqrt(HORIZON)
+    out = {"lo": c * (1 - band), "hi": c * (1 + band), "band": band * 100, "p": None, "signal": None}
+    if model is None or len(df) < 80:
+        return out
+    f = features(df).iloc[[-1]][FEATS]
+    if f.isna().any(axis=None):
+        return out
+    p = float(model.predict_proba(f.astype(float).clip(-5, 5))[:, 1][0])
+    out["p"] = p
+    out["signal"] = "상승 우위" if p >= 0.55 else "하락 우위" if p <= 0.45 else "중립"
+    out["cls"] = "up" if p >= 0.55 else "down" if p <= 0.45 else "flat"
+    return out
+
+
+# ════════════════════════ 실행 ════════════════════════
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--demo", action="store_true")
+    ap.add_argument("--limit", type=int, default=0)
+    args = ap.parse_args()
+
+    if args.demo:
+        lst, hist = demo_data()
+        get = lambda code: hist.get(code)
+    else:
+        lst = get_listing()
+        lst = lst[lst["market"].isin(CFG["markets"])]
+        if CFG.get("exclude_name_regex"):
+            lst = lst[~lst["name"].str.contains(CFG["exclude_name_regex"], regex=True, na=False)]
+        if CFG.get("min_marcap"):
+            lst = lst[lst["marcap"].fillna(0) >= CFG["min_marcap"]]
+        lst = lst.sort_values("marcap", ascending=False)
+        if args.limit:
+            lst = lst.head(args.limit)
+        start = (datetime.now(KST) - timedelta(days=CFG["history_days"])).strftime("%Y-%m-%d")
+        get = lambda code: get_history(code, start)
+
+    rows = lst.to_dict("records")
+    log(f"{len(rows)}개 종목 시세 수집 시작")
+    pairs, fail = [], 0
+    with ThreadPoolExecutor(CFG.get("workers", 8)) as ex:
+        futs = {ex.submit(get, r["code"]): r for r in rows}
+        for i, f in enumerate(as_completed(futs), 1):
+            r = futs[f]
+            try:
+                df = f.result()
+                if df is not None and len(df) >= 2:
+                    pairs.append((r, df))
+                else:
+                    fail += 1
+            except Exception as e:
+                fail += 1
+                log("오류", r["code"], r["name"], e)
+            if i % 300 == 0:
+                log(f"  {i}/{len(rows)} (실패 {fail})")
+    if not pairs:
+        sys.exit("시세를 하나도 받지 못했습니다.")
+    if fail > len(rows) * 0.3:
+        sys.exit(f"실패가 너무 많아 배포를 중단합니다 ({fail}/{len(rows)}). 기존 사이트는 그대로 유지됩니다.")
+
+    # AI 모델 학습 → 종목별 예측
+    model, MODEL_INFO["report"] = train_model([df for _, df in pairs])
+    stocks = []
+    for r, df in pairs:
+        try:
+            s = compute(r, df)
+            s["ai"] = predict(model, df)
+            stocks.append(s)
+        except Exception as e:
+            log("계산 오류", r["code"], r["name"], e)
+
+    # 기준일: 가장 많은 종목이 가진 마지막 날짜
+    base_date = pd.Series([s["date"] for s in stocks]).mode()[0]
+    stale = [s for s in stocks if s["date"] < base_date]
+    if stale:
+        log(f"거래정지 등으로 기준일과 다른 종목 {len(stale)}개 (그대로 표시)")
+    build(stocks, base_date)
+
+
+if __name__ == "__main__":
+    main()
