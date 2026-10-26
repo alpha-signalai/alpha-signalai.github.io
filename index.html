@@ -53,6 +53,15 @@
   <div class="wrap">
     <h2 class="center serif hooks-title">기본 예측으로 부족하다면</h2>
     {{ hook_cards(base) }}
+    {% if today_posts %}
+    <div class="card today-reports">
+      <h2>오늘의 증시 리포트 <span class="muted small-inline">{{ today_posts | length }}개 · 장 마감 후 자동 발행</span></h2>
+      <ul class="post-list">
+        {% for x in today_posts[:12] %}<li><a href="{{ base }}/report/{{ x.date }}/{{ x.slug }}/">{{ x.title }}</a></li>{% endfor %}
+      </ul>
+      <p><a class="result-link" href="{{ base }}/report/">증시 리포트 전체 보기 ›</a></p>
+    </div>
+    {% endif %}
     <p class="center hooks-links"><a href="{{ base }}/ai/">AI 예측 방법·정확도</a> · <a href="{{ base }}/market/kospi/">코스피 전 종목</a> · <a href="{{ base }}/market/kosdaq/">코스닥 전 종목</a></p>
   </div>
 </section>

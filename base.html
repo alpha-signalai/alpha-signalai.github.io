@@ -31,8 +31,8 @@
     </form>
     <nav class="top-nav" aria-label="주요 메뉴">
       <a class="link ai-link" href="{{ base }}/ai/">AI 주가예측 <span class="free">무료</span></a>
+      <a class="link" href="{{ base }}/report/">증시 리포트</a>
       <a class="link" href="{{ base }}/market/kospi/">코스피</a>
-      <a class="link" href="{{ base }}/market/kosdaq/">코스닥</a>
       <a class="btn btn-accent btn-sm" href="#apply">무료 상담</a>
     </nav>
   </div>
@@ -49,7 +49,7 @@
     <p class="foot-logo">{% if cfg.site_name.endswith('AI') %}{{ cfg.site_name[:-2] }}<span class="logo-ai">AI</span>{% else %}{{ cfg.site_name }}{% endif %}</p>
     <p data-biz>{{ cfg.biz_info }}</p>
     <p>AI 주가예측은 과거 시세로 학습한 머신러닝 모델의 통계적 추정이며 미래 수익을 보장하지 않습니다. 본 사이트의 시세와 지표는 공개된 시장 데이터를 자동으로 정리한 것으로, 데이터 제공 시점과 차이가 있을 수 있습니다. 특정 종목의 매수·매도를 권유하지 않으며, 투자에 대한 최종 판단과 책임은 투자자 본인에게 있습니다. 당사는 1:1 투자자문을 제공하지 않습니다.</p>
-    <p><a href="{{ base }}/ai/">AI 주가예측 방법</a> · <a href="{{ base }}/privacy/">개인정보처리방침</a> · <a href="{{ base }}/market/kospi/">코스피 전 종목</a> · <a href="{{ base }}/market/kosdaq/">코스닥 전 종목</a></p>
+    <p><a href="{{ base }}/report/">증시 리포트</a> · <a href="{{ base }}/ai/">AI 주가예측 방법</a> · <a href="{{ base }}/privacy/">개인정보처리방침</a> · <a href="{{ base }}/market/kospi/">코스피 전 종목</a> · <a href="{{ base }}/market/kosdaq/">코스닥 전 종목</a></p>
     <p>© {{ year }} {{ cfg.site_name }}</p>
   </div>
 </footer>

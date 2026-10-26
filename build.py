@@ -408,6 +408,28 @@ def build(stocks, base_date):
               desc=f"{name} 상장 {len(lst)}개 종목의 {base_date} 종가, 등락률, 시가총액 순위.",
               items=lst, path=f"/market/{m.lower()}/")
 
+    # 증시 리포트 (매일 쌓이는 글)
+    posts = load_posts()
+    by_date = {}
+    for p in posts:
+        by_date.setdefault(p["date"], []).append(p)
+    for p in posts:
+        full, short = _kdate(p["date"])
+        same_day = [x for x in by_date[p["date"]] if x["slug"] != p["slug"]][:12]
+        write(f"report/{p['date']}/{p['slug']}/index.html", "post.html", p=p, date_full=full, related=same_day)
+        urls.append((f"/report/{p['date']}/{p['slug']}/", "0.6"))
+    dates = sorted(by_date, reverse=True)
+    for d in dates:
+        full, short = _kdate(d)
+        write(f"report/{d}/index.html", "report_list.html", title=f"{full} 증시 리포트", path=f"/report/{d}/",
+              heading=f"{full} 증시 리포트", groups=[(d, full, by_date[d])], dates=dates[:60])
+        urls.append((f"/report/{d}/", "0.5"))
+    if dates:
+        write("report/index.html", "report_list.html", title="증시 리포트 — 매일 장 마감 후 자동 발행", path="/report/",
+              heading="증시 리포트", groups=[(d, _kdate(d)[0], by_date[d]) for d in dates[:3]], dates=dates[:60])
+        urls.append(("/report/", "0.8"))
+    today_posts = by_date.get(dates[0], []) if dates else []
+
     # 메인
     def top(key, rev=True, n=10, flt=None):
         pool = [s for s in stocks if s[key] is not None and (flt is None or flt(s))]
@@ -419,7 +441,7 @@ def build(stocks, base_date):
     write("index.html", "index.html",
           gainers=top("chg", flt=liquid), losers=top("chg", rev=False, flt=liquid),
           amount=top("amount"), bigcaps=stocks[:10], sectors=sectors[:24], count=len(stocks),
-          ai_up=ai_up, ai_down=ai_down)
+          ai_up=ai_up, ai_down=ai_down, today_posts=today_posts)
     write("ai/index.html", "ai.html", ai_up=ai_up, ai_down=ai_down, count=len(stocks))
 
     write("privacy/index.html", "privacy.html")
@@ -437,7 +459,162 @@ def build(stocks, base_date):
     (OUT / ".nojekyll").write_text("")
     if skipped:
         log(f"건너뛴 종목 {len(skipped)}개: {', '.join(skipped[:20])}")
-    log(f"완료: 종목 {len(stocks)}개, 업종 {len(sectors)}개, 총 {len(urls)}개 URL → {OUT}")
+    log(f"완료: 종목 {len(stocks)}개, 업종 {len(sectors)}개, 리포트 {len(posts)}개(누적), 총 {len(urls)}개 URL → {OUT}")
+
+
+# ════════════════════════ 7. 매일 자동 리포트 글 ════════════════════════
+# 거래일마다 실제 데이터로 리포트 글을 만들어 posts/날짜/글.json 으로 저장하고,
+# 저장된 글은 지우지 않고 쌓아서 /report/ 아래 페이지로 계속 보여줍니다.
+
+POSTS_DIR = ROOT / "posts"
+MAX_SECTOR_POSTS = 60
+
+
+def _row(s, extra=""):
+    return {"code": s["code"], "name": s["name"], "market": s["market"],
+            "close": s["close"], "chg": round(s["chg"] or 0, 2), "extra": extra}
+
+
+def _kdate(d):
+    y, m, dd = d.split("-")
+    return f"{int(y)}년 {int(m)}월 {int(dd)}일", f"{int(m)}월 {int(dd)}일"
+
+
+def make_posts(stocks, base_date):
+    today = [s for s in stocks if s["date"] == base_date and s["chg"] is not None]
+    if len(today) < 20:
+        return []
+    full, short = _kdate(base_date)
+    liquid = [s for s in today if s["amount"] >= 5e8]
+    posts = []
+
+    def add(slug, kind, title, desc, intro, tables, tags):
+        posts.append({"date": base_date, "slug": slug, "kind": kind, "title": title, "desc": desc,
+                      "intro": [x for x in intro if x], "tables": tables, "tags": tags})
+
+    def name_list(xs, k=3):
+        return ", ".join(f"{x['name']}({fmt_pct(x['chg'])})" for x in xs[:k])
+
+    # 1) 시장 마감 요약
+    mk = {}
+    for m in ("KOSPI", "KOSDAQ"):
+        xs = [s for s in today if s["market"] == m]
+        if not xs:
+            continue
+        chg = sorted(s["chg"] for s in xs)
+        mk[m] = {"n": len(xs), "up": sum(c > 0 for c in chg), "down": sum(c < 0 for c in chg),
+                 "med": chg[len(chg) // 2], "amt": sum(s["amount"] for s in xs)}
+    gain = sorted(liquid, key=lambda s: -s["chg"])
+    lose = sorted(liquid, key=lambda s: s["chg"])
+    amt = sorted(today, key=lambda s: -s["amount"])
+    intro = []
+    for m, nm in (("KOSPI", "코스피"), ("KOSDAQ", "코스닥")):
+        if m in mk:
+            v = mk[m]
+            mood = "오른 종목이 더 많았습니다" if v["up"] > v["down"] else "내린 종목이 더 많았습니다" if v["down"] > v["up"] else "오른 종목과 내린 종목 수가 비슷했습니다"
+            intro.append(f"{short} {nm}에서는 {v['n']:,}개 종목 중 {v['up']:,}개가 오르고 {v['down']:,}개가 내려 {mood}. "
+                         f"종목 등락률 중앙값은 {fmt_pct(v['med'])}, 거래대금 합계는 {fmt_won(v['amt'])}입니다.")
+    intro.append(f"거래대금 10억원 이상 종목 가운데 가장 많이 오른 종목은 {name_list(gain)}이고, 가장 많이 내린 종목은 {name_list(lose)}입니다.")
+    intro.append(f"거래대금은 {amt[0]['name']}({fmt_won(amt[0]['amount'])})에 가장 많이 몰렸습니다.")
+    add("market-summary", "summary", f"{full} 증시 마감 요약 — 코스피·코스닥 상승·하락 종목과 거래대금 순위",
+        f"{short} 코스피·코스닥 마감 결과. 상승·하락 종목 수, 상승률·하락률 상위, 거래대금 상위 종목을 정리했습니다.",
+        intro,
+        [{"title": "상승률 상위 10", "extra": "거래대금", "rows": [_row(s, fmt_won(s["amount"])) for s in gain[:10]]},
+         {"title": "하락률 상위 10", "extra": "거래대금", "rows": [_row(s, fmt_won(s["amount"])) for s in lose[:10]]},
+         {"title": "거래대금 상위 10", "extra": "거래대금", "rows": [_row(s, fmt_won(s["amount"])) for s in amt[:10]]}],
+        ["증시 마감", "코스피", "코스닥"])
+
+    # 2) 상승률·하락률 TOP 30
+    if gain:
+        add("top-gainers", "rank", f"{full} 상승률 순위 TOP 30 — 오늘 가장 많이 오른 주식",
+            f"{short} 코스피·코스닥 상승률 상위 30개 종목. 1위 {gain[0]['name']} {fmt_pct(gain[0]['chg'])}.",
+            [f"{short} 거래대금 5억원 이상 종목 중 상승률 1위는 {gain[0]['name']}로 {fmt_pct(gain[0]['chg'])} 올랐습니다.",
+             f"상위 30개 종목의 평균 상승률은 {fmt_pct(sum(s['chg'] for s in gain[:30]) / len(gain[:30]))}입니다."],
+            [{"title": "상승률 TOP 30", "extra": "거래대금", "rows": [_row(s, fmt_won(s["amount"])) for s in gain[:30]]}],
+            ["상승률 순위", "급등주"])
+        add("top-losers", "rank", f"{full} 하락률 순위 TOP 30 — 오늘 가장 많이 내린 주식",
+            f"{short} 코스피·코스닥 하락률 상위 30개 종목. 1위 {lose[0]['name']} {fmt_pct(lose[0]['chg'])}.",
+            [f"{short} 거래대금 5억원 이상 종목 중 가장 많이 내린 종목은 {lose[0]['name']}({fmt_pct(lose[0]['chg'])})입니다."],
+            [{"title": "하락률 TOP 30", "extra": "거래대금", "rows": [_row(s, fmt_won(s["amount"])) for s in lose[:30]]}],
+            ["하락률 순위", "급락주"])
+
+    # 3) 거래량 급증
+    surge = sorted([s for s in liquid if (s["vol_ratio"] or 0) >= 2], key=lambda s: -s["vol_ratio"])[:30]
+    if len(surge) >= 5:
+        add("volume-surge", "rank", f"{full} 거래량 급증 종목 — 평소보다 거래가 몰린 주식 {len(surge)}개",
+            f"{short} 최근 20일 평균보다 거래량이 2배 이상 늘어난 종목. 1위 {surge[0]['name']} {surge[0]['vol_ratio']:.1f}배.",
+            [f"{short} 거래량이 최근 20거래일 평균의 2배를 넘은 종목은 거래대금 5억원 이상 기준 {len(surge)}개입니다.",
+             f"가장 크게 늘어난 종목은 {surge[0]['name']}로 평소의 {surge[0]['vol_ratio']:.1f}배가 거래됐고, 주가는 {fmt_pct(surge[0]['chg'])} 움직였습니다."],
+            [{"title": "거래량 급증 순위", "extra": "평소 대비", "rows": [_row(s, f"{s['vol_ratio']:.1f}배") for s in surge]}],
+            ["거래량 급증", "수급"])
+
+    # 4) 52주 신고가·신저가 근접
+    hi = sorted([s for s in liquid if s["from_hi"] is not None and s["from_hi"] > -1], key=lambda s: -s["chg"])[:30]
+    if len(hi) >= 3:
+        add("new-high", "rank", f"{full} 52주 신고가 근접 종목 {len(hi)}개",
+            f"{short} 52주 최고가 부근(1% 이내)에서 거래를 마친 종목. {name_list(hi, 2)} 등.",
+            [f"{short} 종가가 52주 최고가의 1% 이내에 있는 종목은 {len(hi)}개입니다.",
+             f"이 중 당일 상승률이 높은 종목은 {name_list(hi)}입니다."],
+            [{"title": "52주 신고가 근접", "extra": "52주 최고가", "rows": [_row(s, fmt_price(s["hi52"])) for s in hi]}],
+            ["52주 신고가", "신고가"])
+    lo = sorted([s for s in liquid if s["from_lo"] is not None and s["from_lo"] < 1], key=lambda s: s["chg"])[:30]
+    if len(lo) >= 3:
+        add("new-low", "rank", f"{full} 52주 신저가 근접 종목 {len(lo)}개",
+            f"{short} 52주 최저가 부근(1% 이내)에서 거래를 마친 종목. {name_list(lo, 2)} 등.",
+            [f"{short} 종가가 52주 최저가의 1% 이내에 있는 종목은 {len(lo)}개입니다."],
+            [{"title": "52주 신저가 근접", "extra": "52주 최저가", "rows": [_row(s, fmt_price(s["lo52"])) for s in lo]}],
+            ["52주 신저가", "신저가"])
+
+    # 5) AI 상승 확률 상위
+    aip = sorted([s for s in liquid if s["ai"].get("p") is not None], key=lambda s: -s["ai"]["p"])[:20]
+    if len(aip) >= 5:
+        add("ai-top", "ai", f"{full} AI 주가예측 — 5거래일 상승 확률 상위 20 종목",
+            f"{short} 기준 AI 모델이 계산한 5거래일 뒤 상승 확률 상위 종목. 1위 {aip[0]['name']} {aip[0]['ai']['p']*100:.0f}%.",
+            [f"{CFG['site_name']} AI 모델이 {short} 종가까지의 데이터로 계산한 5거래일 뒤 상승 확률 상위 종목입니다.",
+             f"1위는 {aip[0]['name']}({aip[0]['ai']['p']*100:.0f}%)입니다. AI 예측은 통계적 추정이며 매수 추천이 아닙니다."],
+            [{"title": "AI 상승 확률 상위 20", "extra": "상승 확률", "rows": [_row(s, f"{s['ai']['p']*100:.0f}%") for s in aip]}],
+            ["AI 주가예측", "주가 예측"])
+
+    # 6) 업종별
+    by = {}
+    for s in today:
+        if s["sector"]:
+            by.setdefault(s["sector"], []).append(s)
+    secs = sorted([(k, v) for k, v in by.items() if len(v) >= 5], key=lambda kv: -sum(x["amount"] for x in kv[1]))[:MAX_SECTOR_POSTS]
+    for sec, xs in secs:
+        xs = sorted(xs, key=lambda s: -s["chg"])
+        avg = sum(s["chg"] for s in xs) / len(xs)
+        up, down = sum(s["chg"] > 0 for s in xs), sum(s["chg"] < 0 for s in xs)
+        lead = max(xs, key=lambda s: s["amount"])
+        tone = ("강세" if avg >= 1 else "약보합" if avg < 0 and avg > -1 else "약세" if avg <= -1 else "강보합")
+        add(f"sector-{slug(sec)}", "sector", f"{full} {sec} 관련주 주가 — 업종 {tone}, 평균 {fmt_pct(avg)}",
+            f"{short} {sec} 업종 {len(xs)}개 종목 등락률. 상승 {up}개·하락 {down}개, 최고 상승 {xs[0]['name']} {fmt_pct(xs[0]['chg'])}.",
+            [f"{short} {sec} 업종 {len(xs)}개 종목의 평균 등락률은 {fmt_pct(avg)}로 {tone}를 보였습니다. 상승 {up}개, 하락 {down}개입니다.",
+             f"가장 많이 오른 종목은 {name_list(xs, 3)}이고, 가장 많이 내린 종목은 {xs[-1]['name']}({fmt_pct(xs[-1]['chg'])})입니다.",
+             f"업종 내 거래대금이 가장 많은 종목은 {lead['name']}({fmt_won(lead['amount'])}, {fmt_pct(lead['chg'])})입니다."],
+            [{"title": f"{sec} 관련주 등락률", "extra": "시가총액", "rows": [_row(s, fmt_won(s["marcap"])) for s in xs[:40]]}],
+            [f"{sec} 관련주", sec])
+    return posts
+
+
+def save_posts(posts):
+    for p in posts:
+        d = POSTS_DIR / p["date"]
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{p['slug']}.json").write_text(json.dumps(p, ensure_ascii=False), encoding="utf-8")
+
+
+def load_posts():
+    out = []
+    if POSTS_DIR.is_dir():
+        for f in sorted(POSTS_DIR.glob("*/*.json")):
+            try:
+                out.append(json.loads(f.read_text(encoding="utf-8")))
+            except Exception as e:
+                log("리포트 읽기 실패", f, e)
+    order = {"summary": 0, "ai": 1, "rank": 2, "sector": 3}
+    out.sort(key=lambda p: (p["date"], -order.get(p["kind"], 9)), reverse=True)
+    return out
 
 
 # ════════════════════════ 6. AI 주가예측 모델 ════════════════════════
@@ -597,6 +774,12 @@ def main():
     stale = [s for s in stocks if s["date"] < base_date]
     if stale:
         log(f"거래정지 등으로 기준일과 다른 종목 {len(stale)}개 (그대로 표시)")
+    try:
+        new_posts = make_posts(stocks, base_date)
+        save_posts(new_posts)
+        log(f"오늘의 리포트 {len(new_posts)}개 생성 ({base_date})")
+    except Exception as e:
+        log("리포트 생성 실패 (사이트는 계속 생성):", repr(e)[:200])
     build(stocks, base_date)
 
 
