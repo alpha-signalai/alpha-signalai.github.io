@@ -67,24 +67,59 @@ def listing_daum():
 def get_sectors_naver():
     """네이버 증권 업종 분류(약 80개)를 종목코드 → 업종명으로 가져옴"""
     import requests
-    H = {"User-Agent": DAUM_HEADERS["User-Agent"]}
+    H = {"User-Agent": DAUM_HEADERS["User-Agent"], "Referer": "https://finance.naver.com/",
+         "Accept-Language": "ko-KR,ko;q=0.9"}
     base = "https://finance.naver.com"
     r = requests.get(base + "/sise/sise_group.naver?type=upjong", headers=H, timeout=15)
     r.encoding = "euc-kr"
-    groups = dict(re.findall(r'sise_group_detail\.n(?:aver|hn)\?type=upjong&(?:amp;)?no=(\d+)"[^>]*>([^<]+)</a>', r.text))
+    groups = dict(re.findall(r'type=upjong&(?:amp;)?no=(\d+)[^>]*>\s*([^<]+?)\s*</a>', r.text))
+    if len(groups) < 10:
+        raise RuntimeError(f"네이버 업종 목록 인식 실패 (HTTP {r.status_code}, {len(r.text)}자, 업종 {len(groups)}개)")
     out = {}
 
     def one(item):
         no, name = item
         rr = requests.get(f"{base}/sise/sise_group_detail.naver?type=upjong&no={no}", headers=H, timeout=15)
         rr.encoding = "euc-kr"
-        return name.strip(), re.findall(r'/item/main\.n(?:aver|hn)\?code=(\d{6})', rr.text)
+        return name.strip(), re.findall(r'code=(\d{6})', rr.text)
 
     with ThreadPoolExecutor(6) as ex:
         for name, codes in ex.map(one, groups.items()):
             for c in codes:
                 out.setdefault(c, name)
     return out
+
+
+def get_sectors_kind():
+    """한국거래소 KIND 상장회사 목록의 '업종' (예: 반도체 제조업)"""
+    import requests, html as _html
+    url = "https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13"
+    r = requests.get(url, headers={"User-Agent": DAUM_HEADERS["User-Agent"]}, timeout=30)
+    r.encoding = "euc-kr"
+    out = {}
+    for row in re.findall(r"<tr>(.*?)</tr>", r.text, re.S):
+        cells = [_html.unescape(re.sub(r"<[^>]+>", "", c)).strip() for c in re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)]
+        # 회사명, 시장구분, 종목코드, 업종, 주요제품, ... (열 순서가 바뀌어도 6자리 코드 다음 칸을 업종으로 봄)
+        for i, c in enumerate(cells):
+            if re.fullmatch(r"[0-9A-Z]{6}", c) and i + 1 < len(cells):
+                if cells[i + 1]:
+                    out[c] = cells[i + 1]
+                break
+    if len(out) < 500:
+        raise RuntimeError(f"KIND 업종 인식 실패 (HTTP {r.status_code}, {len(r.text)}자, {len(out)}종목)")
+    return out
+
+
+def get_sectors():
+    for fn in (get_sectors_naver, get_sectors_kind):
+        try:
+            sec = fn()
+            log(f"업종 분류({fn.__name__}): {len(set(sec.values()))}개 업종, {len(sec)}개 종목")
+            if len(sec) > 500:
+                return sec
+        except Exception as e:
+            log(f"{fn.__name__} 실패:", repr(e)[:200])
+    return {}
 
 
 def get_listing():
@@ -753,12 +788,7 @@ def main():
         if CFG.get("min_marcap"):
             lst = lst[lst["marcap"].fillna(0) >= CFG["min_marcap"]]
         # 업종: 네이버 업종 우선, 실패하면 KRX 업종 중 '소속부' 같은 값은 버림
-        try:
-            sec = get_sectors_naver()
-            log(f"네이버 업종 분류: {len(set(sec.values()))}개 업종, {len(sec)}개 종목")
-        except Exception as e:
-            sec = {}
-            log("네이버 업종 분류 실패:", repr(e)[:120])
+        sec = get_sectors()
         old_sec = lst["sector"] if "sector" in lst.columns else pd.Series([None] * len(lst), index=lst.index)
         bad = old_sec.astype(str).str.contains(r"부$|소속부|관리종목|투자주의|nan", regex=True)
         lst["sector"] = [sec.get(c) or (o if not b else None) for c, o, b in zip(lst["code"], old_sec, bad)]
