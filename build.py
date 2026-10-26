@@ -98,12 +98,22 @@ def hist_daum(code, start):
     return df.set_index("Date").sort_index()
 
 
+def clean_ohlc(df):
+    """거래정지일처럼 가격이 0이거나 비정상인 날을 걸러냄"""
+    df = df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
+    df = df[(df["Volume"] > 0) & (df["Close"] > 0) & (df["High"] > 0) & (df["Low"] > 0)].copy()
+    df["Open"] = df["Open"].where(df["Open"] > 0, df["Close"])
+    df["High"] = df[["High", "Open", "Close"]].max(axis=1)
+    df["Low"] = df[["Low", "Open", "Close"]].min(axis=1)
+    return df
+
+
 def get_history(code, start):
     for fn in (hist_fdr, hist_daum):
         for attempt in range(2):
             try:
                 df = fn(code, start)
-                df = df[df["Volume"] > 0].dropna()
+                df = clean_ohlc(df)
                 if len(df) >= 2:
                     return df
             except Exception:
@@ -147,7 +157,9 @@ def pct(a, b):
 
 
 def compute(row, df):
-    df = df.tail(260)
+    df = clean_ohlc(df).tail(260)
+    if len(df) < 2:
+        raise ValueError("유효한 시세가 부족합니다")
     last, prev = df.iloc[-1], df.iloc[-2]
     c = float(last.Close)
     y = df.tail(250)
@@ -280,7 +292,7 @@ def summary(s):
         r = s["r1m"]
         out.append(f"최근 1개월 동안 주가는 {abs(r):.1f}% {'올랐' if r >= 0 else '내렸'}고, "
                    + (f"3개월 기준으로는 {fmt_pct(s['r3m'])}입니다." if s["r3m"] is not None else "") )
-    if s["from_hi"] is not None:
+    if s["from_hi"] is not None and s["from_lo"] is not None:
         if s["from_hi"] > -1:
             out.append(f"현재 주가는 52주 최고가({fmt_price(s['hi52'])}원) 부근에 있습니다.")
         else:
@@ -311,6 +323,13 @@ def faqs(s):
 
 
 # ════════════════════════ 5. 페이지 생성 ════════════════════════
+
+def safe_round(v):
+    try:
+        return round(float(v))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
 
 def slug(text):
     return re.sub(r"[^0-9A-Za-z가-힣]+", "-", text).strip("-")
@@ -353,7 +372,8 @@ def build(stocks, base_date):
 
     urls = [("/", "1.0"), ("/ai/", "0.9"), ("/market/kospi/", "0.8"), ("/market/kosdaq/", "0.8"), ("/privacy/", "0.2")]
 
-    # 종목 페이지
+    # 종목 페이지 (한 종목에서 문제가 생겨도 나머지는 계속 생성)
+    skipped = []
     for s in stocks:
         peers = []
         if s["sector"] and len(by_sector[s["sector"]]) > 1:
@@ -363,10 +383,14 @@ def build(stocks, base_date):
             i = mk.index(s)
             near = mk[max(0, i - 6): i] + mk[i + 1: i + 7]
             peers += [p for p in near if p not in peers][: 8 - len(peers)]
-        write(f"stock/{s['code']}/index.html", "stock.html", s=s, peers=peers,
-              summary=summary(s), faqs=faqs(s), rank=rank[s["code"]] + 1, total=len(stocks),
-              sector_slug=slug(s["sector"]) if s["sector"] and len(by_sector.get(s["sector"], [])) >= 3 else None)
-        urls.append((f"/stock/{s['code']}/", "0.7"))
+        try:
+            write(f"stock/{s['code']}/index.html", "stock.html", s=s, peers=peers,
+                  summary=summary(s), faqs=faqs(s), rank=rank[s["code"]] + 1, total=len(stocks),
+                  sector_slug=slug(s["sector"]) if s["sector"] and len(by_sector.get(s["sector"], [])) >= 3 else None)
+            urls.append((f"/stock/{s['code']}/", "0.7"))
+        except Exception as e:
+            skipped.append(s["code"])
+            log("페이지 생성 건너뜀", s["code"], s["name"], repr(e)[:120])
 
     # 업종 페이지 (3종목 이상)
     sectors = sorted([(k, v) for k, v in by_sector.items() if len(v) >= 3], key=lambda kv: -len(kv[1]))
@@ -404,13 +428,15 @@ def build(stocks, base_date):
     # 검색용 목록, 사이트맵, robots
     (OUT / "stocks.json").write_text(json.dumps([[s["code"], s["name"], s["market"], s["close"], round(s["chg"] or 0, 2),
                     round(s["ai"]["p"], 3) if s["ai"].get("p") is not None else None,
-                    round(s["ai"]["lo"]), round(s["ai"]["hi"])] for s in stocks], ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+                    safe_round(s["ai"]["lo"]), safe_round(s["ai"]["hi"])] for s in stocks], ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     sm = ['<?xml version="1.0" encoding="UTF-8"?>', '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
     sm += [f"<url><loc>{site_url}{u}</loc><lastmod>{base_date}</lastmod><priority>{p}</priority></url>" for u, p in urls]
     sm.append("</urlset>")
     (OUT / "sitemap.xml").write_text("\n".join(sm), encoding="utf-8")
     (OUT / "robots.txt").write_text(f"User-agent: *\nAllow: /\nSitemap: {site_url}/sitemap.xml\n", encoding="utf-8")
     (OUT / ".nojekyll").write_text("")
+    if skipped:
+        log(f"건너뛴 종목 {len(skipped)}개: {', '.join(skipped[:20])}")
     log(f"완료: 종목 {len(stocks)}개, 업종 {len(sectors)}개, 총 {len(urls)}개 URL → {OUT}")
 
 
@@ -492,7 +518,8 @@ def train_model(dfs):
 
 def predict(model, df):
     c = float(df["Close"].iloc[-1])
-    sd = float(df["Close"].pct_change().tail(20).std() or 0)
+    sd = df["Close"].pct_change().tail(20).std()
+    sd = 0.0 if sd is None or not math.isfinite(float(sd)) else float(sd)
     band = sd * math.sqrt(HORIZON)
     out = {"lo": c * (1 - band), "hi": c * (1 + band), "band": band * 100, "p": None, "signal": None}
     if model is None or len(df) < 80:
