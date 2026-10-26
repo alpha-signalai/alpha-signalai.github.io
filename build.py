@@ -553,7 +553,17 @@ def build(stocks, base_date):
     ai_pool = [s for s in stocks if s["ai"].get("p") is not None and liquid(s)]
     ai_up = sorted(ai_pool, key=lambda s: -s["ai"]["p"])[:10]
     ai_down = sorted(ai_pool, key=lambda s: s["ai"]["p"])[:10]
-    write("index.html", "index.html",
+    # 메인 '오늘의 주요 종목 뉴스': 시총 상위 종목 뉴스를 모아 최신순
+    top_news, seen = [], set()
+    for st in stocks[:40]:
+        for n in st.get("news") or []:
+            k = n["title"][:30]
+            if k in seen:
+                continue
+            seen.add(k)
+            top_news.append({**n, "code": st["code"], "name": st["name"]})
+    top_news = sorted(top_news, key=lambda x: -x.get("ts", 0))[:15]
+    write("index.html", "index.html", top_news=top_news,
           gainers=top("chg", flt=liquid), losers=top("chg", rev=False, flt=liquid),
           amount=top("amount"), bigcaps=stocks[:10], sectors=sectors[:24], count=len(stocks),
           ai_up=ai_up, ai_down=ai_down, today_posts=today_posts)
@@ -897,6 +907,9 @@ def main():
     try:
         if not args.demo:
             get_news(stocks)
+        elif os.environ.get("DEMO_NEWS"):
+            for i, st in enumerate(sorted(stocks, key=lambda x: -(x["marcap"] or 0))[:6]):
+                st["news"] = [{"title": f"{st['name']} 관련 샘플 기사 제목입니다 {j}", "source": "샘플일보", "link": "https://example.com/", "time": f"10.26 1{j}:0{i}", "ts": 100 * j + i} for j in range(3)]
     except Exception as e:
         log("뉴스 수집 실패 (사이트는 계속 생성):", repr(e)[:200])
     try:

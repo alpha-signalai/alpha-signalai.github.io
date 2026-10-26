@@ -49,6 +49,28 @@
   </div>
 </section>
 
+{% if top_news %}
+<section class="news-sec">
+  <div class="wrap">
+    <div class="card news-card">
+      <div class="news-head">
+        <h2>오늘의 주요 종목 뉴스</h2>
+        <span class="muted small-inline">시가총액 상위 종목 · 매 거래일 갱신</span>
+      </div>
+      <ul class="news-list news-grid">
+        {% for n in top_news %}
+        <li>
+          <a href="{{ n.link }}" target="_blank" rel="nofollow noopener noreferrer"><span class="news-title">{{ n.title }}</span><span class="news-meta">{{ n.source }}{% if n.time %} · {{ n.time }}{% endif %}</span></a>
+          <a class="news-stock" href="{{ base }}/stock/{{ n.code }}/">{{ n.name }} AI 예측 보기 ›</a>
+        </li>
+        {% endfor %}
+      </ul>
+      <p class="news-note">기사 제목과 링크만 제공하며, 기사 원문과 저작권은 각 언론사에 있습니다. (출처: Google 뉴스)</p>
+    </div>
+  </div>
+</section>
+{% endif %}
+
 <section class="hooks-sec">
   <div class="wrap">
     <h2 class="center serif hooks-title">기본 예측으로 부족하다면</h2>
