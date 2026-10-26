@@ -64,6 +64,29 @@ def listing_daum():
     return pd.DataFrame(rows)
 
 
+def get_sectors_naver():
+    """네이버 증권 업종 분류(약 80개)를 종목코드 → 업종명으로 가져옴"""
+    import requests
+    H = {"User-Agent": DAUM_HEADERS["User-Agent"]}
+    base = "https://finance.naver.com"
+    r = requests.get(base + "/sise/sise_group.naver?type=upjong", headers=H, timeout=15)
+    r.encoding = "euc-kr"
+    groups = dict(re.findall(r'sise_group_detail\.n(?:aver|hn)\?type=upjong&(?:amp;)?no=(\d+)"[^>]*>([^<]+)</a>', r.text))
+    out = {}
+
+    def one(item):
+        no, name = item
+        rr = requests.get(f"{base}/sise/sise_group_detail.naver?type=upjong&no={no}", headers=H, timeout=15)
+        rr.encoding = "euc-kr"
+        return name.strip(), re.findall(r'/item/main\.n(?:aver|hn)\?code=(\d{6})', rr.text)
+
+    with ThreadPoolExecutor(6) as ex:
+        for name, codes in ex.map(one, groups.items()):
+            for c in codes:
+                out.setdefault(c, name)
+    return out
+
+
 def get_listing():
     for fn in (listing_fdr, listing_daum):
         try:
@@ -729,6 +752,16 @@ def main():
             lst = lst[~lst["name"].str.contains(CFG["exclude_name_regex"], regex=True, na=False)]
         if CFG.get("min_marcap"):
             lst = lst[lst["marcap"].fillna(0) >= CFG["min_marcap"]]
+        # 업종: 네이버 업종 우선, 실패하면 KRX 업종 중 '소속부' 같은 값은 버림
+        try:
+            sec = get_sectors_naver()
+            log(f"네이버 업종 분류: {len(set(sec.values()))}개 업종, {len(sec)}개 종목")
+        except Exception as e:
+            sec = {}
+            log("네이버 업종 분류 실패:", repr(e)[:120])
+        old_sec = lst["sector"] if "sector" in lst.columns else pd.Series([None] * len(lst), index=lst.index)
+        bad = old_sec.astype(str).str.contains(r"부$|소속부|관리종목|투자주의|nan", regex=True)
+        lst["sector"] = [sec.get(c) or (o if not b else None) for c, o, b in zip(lst["code"], old_sec, bad)]
         lst = lst.sort_values("marcap", ascending=False)
         if args.limit:
             lst = lst.head(args.limit)
