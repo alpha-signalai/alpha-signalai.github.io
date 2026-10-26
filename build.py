@@ -320,10 +320,16 @@ def build(stocks, base_date):
     if OUT.exists():
         shutil.rmtree(OUT)
     (OUT / "assets").mkdir(parents=True)
-    for f in (ROOT / "static").iterdir():
-        shutil.copy(f, OUT / "assets" / f.name)
+    # 폴더째 올라가지 않고 파일이 맨 바깥에 흩어져 있어도 찾을 수 있게 처리
+    static_dir = ROOT / "static" if (ROOT / "static").is_dir() else ROOT
+    for name in ("site.css", "site.js"):
+        src = static_dir / name
+        if not src.exists():
+            sys.exit(f"{name} 파일을 찾을 수 없습니다.")
+        shutil.copy(src, OUT / "assets" / name)
 
-    env = Environment(loader=FileSystemLoader(ROOT / "templates"), autoescape=select_autoescape(["html"]))
+    tpl_dirs = [d for d in (ROOT / "templates", ROOT) if d.is_dir()]
+    env = Environment(loader=FileSystemLoader(tpl_dirs), autoescape=select_autoescape(["html"]))
     env.filters.update(price=fmt_price, won=fmt_won, pct=fmt_pct, slug=slug)
     base = CFG["base_path"].rstrip("/")
     site_url = CFG["site_url"].rstrip("/") + base
