@@ -122,6 +122,63 @@ def get_sectors():
     return {}
 
 
+def fetch_news(name, limit=5, days=7):
+    """구글 뉴스 RSS에서 종목 관련 최신 기사 제목·언론사·시간·링크만 가져옴 (본문은 가져오지 않음)"""
+    import requests, urllib.parse, xml.etree.ElementTree as ET
+    from email.utils import parsedate_to_datetime
+    q = urllib.parse.quote(f'"{name}" 주가 OR "{name}" 주식')
+    url = f"https://news.google.com/rss/search?q={q}+when:{days}d&hl=ko&gl=KR&ceid=KR:ko"
+    r = requests.get(url, headers={"User-Agent": DAUM_HEADERS["User-Agent"]}, timeout=15)
+    r.raise_for_status()
+    items = []
+    for it in ET.fromstring(r.content).iter("item"):
+        title = (it.findtext("title") or "").strip()
+        src = (it.findtext("source") or "").strip()
+        if src and title.endswith(" - " + src):
+            title = title[: -len(src) - 3].strip()
+        try:
+            dt = parsedate_to_datetime(it.findtext("pubDate")).astimezone(KST)
+        except Exception:
+            dt = None
+        link = (it.findtext("link") or "").strip()
+        if title and link.startswith("https://"):
+            items.append({"title": title, "source": src, "link": link,
+                          "time": dt.strftime("%m.%d %H:%M") if dt else "", "ts": dt.timestamp() if dt else 0})
+    items.sort(key=lambda x: -x["ts"])
+    seen, out = set(), []
+    for x in items:
+        k = x["title"][:30]
+        if k not in seen:
+            seen.add(k)
+            out.append(x)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def get_news(stocks):
+    n = int(CFG.get("news_top_n", 300))
+    targets = sorted(stocks, key=lambda s: -(s["marcap"] or 0))[:n]
+    got, fail = 0, 0
+
+    def one(s):
+        for attempt in range(2):
+            try:
+                return s, fetch_news(s["name"])
+            except Exception:
+                time.sleep(1 + attempt)
+        return s, None
+
+    with ThreadPoolExecutor(4) as ex:
+        for s, news in ex.map(one, targets):
+            if news is None:
+                fail += 1
+            elif news:
+                s["news"] = news
+                got += 1
+    log(f"종목 뉴스: {got}개 종목 수집 (대상 {len(targets)}, 실패 {fail})")
+
+
 def get_listing():
     for fn in (listing_fdr, listing_daum):
         try:
@@ -837,6 +894,11 @@ def main():
     stale = [s for s in stocks if s["date"] < base_date]
     if stale:
         log(f"거래정지 등으로 기준일과 다른 종목 {len(stale)}개 (그대로 표시)")
+    try:
+        if not args.demo:
+            get_news(stocks)
+    except Exception as e:
+        log("뉴스 수집 실패 (사이트는 계속 생성):", repr(e)[:200])
     try:
         new_posts = make_posts(stocks, base_date)
         save_posts(new_posts)

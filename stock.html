@@ -124,6 +124,18 @@
     </div>
   </section>
 
+  {% if s.news %}
+  <section class="card">
+    <h2>{{ s.name }} 최신 뉴스</h2>
+    <ul class="news-list">
+      {% for n in s.news %}
+      <li><a href="{{ n.link }}" target="_blank" rel="nofollow noopener noreferrer"><span class="news-title">{{ n.title }}</span><span class="news-meta">{{ n.source }}{% if n.time %} · {{ n.time }}{% endif %}</span></a></li>
+      {% endfor %}
+    </ul>
+    <p class="news-note">기사 제목과 링크만 제공하며, 기사 원문과 저작권은 각 언론사에 있습니다. (출처: Google 뉴스)</p>
+  </section>
+  {% endif %}
+
   <section class="card">
     <h2>최근 10거래일 시세</h2>
     <div class="table-box">
