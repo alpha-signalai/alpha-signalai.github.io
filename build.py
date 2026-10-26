@@ -314,7 +314,140 @@ def compute(row, df):
         "r1w": ret(5), "r1m": ret(20), "r3m": ret(60), "r6m": ret(120), "r1y": ret(245),
         "recent": recent,
         "chart": chart_svg(df.tail(120)),
+        **tech_stats(df),
     }
+
+
+def tech_stats(df):
+    """AI 코멘트용 기술 지표"""
+    c = df["Close"].astype(float)
+    ret = c.pct_change()
+    out = {"ma20": None, "ma60": None, "volat": None, "rsi": None, "hi20": None, "lo20": None}
+    if len(c) >= 20:
+        out["ma20"] = float(c.tail(20).mean())
+        out["hi20"] = float(df["High"].tail(20).max())
+        out["lo20"] = float(df["Low"].tail(20).min())
+        sd = ret.tail(20).std()
+        if sd == sd:
+            out["volat"] = float(sd) * math.sqrt(252) * 100
+    if len(c) >= 60:
+        out["ma60"] = float(c.tail(60).mean())
+    if len(c) >= 15:
+        g = ret.clip(lower=0).tail(14).mean()
+        l = (-ret.clip(upper=0)).tail(14).mean()
+        if g + l > 0:
+            out["rsi"] = float(100 * g / (g + l))
+    return out
+
+
+def ai_comment(s):
+    """데이터 기반 'AI 코멘트' — 종목마다 수치에 따라 문장을 다르게 조합 (투자 권유 문구 없음)"""
+    import hashlib
+    seed = int(hashlib.md5((s["code"] + s["date"]).encode()).hexdigest(), 16)
+    pick = lambda opts, k=0: opts[(seed >> (k * 3)) % len(opts)]
+    c, nm = s["close"], s["name"]
+    ma20, ma60 = s.get("ma20"), s.get("ma60")
+    pts = []
+
+    # 1) 추세
+    trend = "중립"
+    if ma20 and ma60:
+        a20, a60 = c >= ma20, c >= ma60
+        if a20 and a60:
+            trend = "상승"
+            t = pick(["단기·중기 이동평균을 모두 웃돌며 상승 흐름을 유지하고 있습니다",
+                      "20일·60일 평균선 위에서 거래되며 추세가 위쪽을 향하고 있습니다",
+                      "주요 이동평균선 위에 안착해 있어 흐름은 우호적인 편입니다"], 1)
+        elif a20 and not a60:
+            trend = "반등"
+            t = pick(["20일 평균은 회복했지만 60일 평균 아래에 있어 단기 반등 국면으로 읽힙니다",
+                      "단기 평균선은 넘어섰으나 중기 평균선이 위에서 저항으로 작용할 수 있는 구간입니다"], 1)
+        elif not a20 and a60:
+            trend = "조정"
+            t = pick(["중기 흐름은 유지되고 있으나 20일 평균을 밑돌며 단기 조정을 받고 있습니다",
+                      "60일 평균 위에 있지만 단기 평균선을 내줘 숨 고르기 구간으로 보입니다"], 1)
+        else:
+            trend = "하락"
+            t = pick(["20일·60일 평균선을 모두 밑돌아 아직 하락 흐름에서 벗어나지 못했습니다",
+                      "주요 이동평균선 아래에 머물러 있어 추세 전환 신호는 아직 약합니다"], 1)
+        pts.append(("추세", f"{t}. (20일 평균 {fmt_price(ma20)}원 · 60일 평균 {fmt_price(ma60)}원)"))
+
+    # 2) 모멘텀
+    r1m, r3m = s.get("r1m"), s.get("r3m")
+    if r1m is not None:
+        if r3m is not None and r1m > 0 and r3m > 0:
+            m = f"최근 1개월 {fmt_pct(r1m)}, 3개월 {fmt_pct(r3m)}로 오름세가 이어지고 있습니다"
+        elif r3m is not None and r1m > 0 >= r3m:
+            m = f"3개월 기준 {fmt_pct(r3m)}로 부진했지만 최근 1개월은 {fmt_pct(r1m)}로 회복을 시도 중입니다"
+        elif r3m is not None and r1m <= 0 < r3m:
+            m = f"3개월 {fmt_pct(r3m)} 상승 이후 최근 1개월 {fmt_pct(r1m)}로 상승분을 일부 반납했습니다"
+        else:
+            m = f"최근 1개월 {fmt_pct(r1m)}" + (f", 3개월 {fmt_pct(r3m)}" if r3m is not None else "") + "로 약세가 이어지고 있습니다"
+        rsi = s.get("rsi")
+        if rsi is not None:
+            if rsi >= 70:
+                m += f". 단기 과열 지표(RSI {rsi:.0f})가 높아 변동이 커질 수 있습니다"
+            elif rsi <= 30:
+                m += f". 단기 과매도 지표(RSI {rsi:.0f}) 구간에 진입해 있습니다"
+        pts.append(("모멘텀", m + "."))
+
+    # 3) 거래량
+    vr = s.get("vol_ratio")
+    if vr:
+        if vr >= 3:
+            v = pick([f"거래량이 평소의 {vr:.1f}배로 급증해 시장의 관심이 크게 몰렸습니다",
+                      f"평소 대비 {vr:.1f}배의 거래가 터져 수급 변화가 뚜렷합니다"], 2)
+        elif vr >= 1.5:
+            v = f"거래량이 평소의 {vr:.1f}배로 늘어 관심이 유입되고 있습니다"
+        elif vr <= 0.6:
+            v = f"거래량이 평소의 {vr:.1f}배 수준으로 줄어 관망세가 짙습니다"
+        else:
+            v = "거래량은 평소 수준으로, 특별한 수급 변화는 보이지 않습니다"
+        pts.append(("거래량", v + "."))
+
+    # 4) 변동성·위치
+    vol = s.get("volat")
+    pos = []
+    if vol is not None:
+        lvl = "높은 편입니다" if vol >= 50 else "보통 수준입니다" if vol >= 25 else "낮은 편입니다"
+        pos.append(f"최근 변동성은 연 {vol:.0f}%로 {lvl}")
+    if s.get("from_hi") is not None:
+        if s["from_hi"] > -3:
+            pos.append("주가는 52주 최고가에 근접해 있습니다")
+        elif s["from_lo"] is not None and s["from_lo"] < 5:
+            pos.append("주가는 52주 최저가 부근에 머물러 있습니다")
+        else:
+            pos.append(f"주가는 52주 최고가보다 {abs(s['from_hi']):.0f}% 낮은 위치입니다")
+    if pos:
+        pts.append(("위치·변동성", ". ".join(pos) + "."))
+
+    # 5) AI 시그널
+    ai = s.get("ai") or {}
+    if ai.get("p") is not None:
+        pts.append(("AI 시그널", f"5거래일 상승 확률 {ai['p']*100:.0f}%로 '{ai['signal']}' 판단이며, 예상 범위는 {fmt_price(ai['lo'])}~{fmt_price(ai['hi'])}원입니다."))
+
+    # 헤드라인
+    heads = {
+        "상승": ["상승 추세 유지, 과열 여부 점검 구간", "추세 우위 지속, 눌림 구간 체크 필요", "강한 흐름 속 변동성 관리가 관건"],
+        "반등": ["단기 반등 시도, 중기 저항 돌파가 관건", "바닥 확인 중, 60일선 회복 여부 주목", "반등 국면 진입, 추세 전환은 확인 필요"],
+        "조정": ["중기 흐름 속 단기 숨 고르기", "단기 조정 구간, 지지선 확인 필요", "추세 유지 속 단기 눌림"],
+        "하락": ["하락 흐름 지속, 바닥 신호 확인 전", "약세 구간, 거래량 동반 반등 여부 관건", "추세 전환 신호 대기 국면"],
+        "중립": ["방향성 탐색 구간", "뚜렷한 추세 없는 박스권 흐름"],
+    }
+    head = pick(heads[trend], 4)
+    if vr and vr >= 3:
+        head = pick(["거래량 급증, 수급 변화 주목", "대량 거래 동반, 방향성 확인 구간"], 5) + " · " + head.split(",")[0]
+
+    # 체크포인트
+    watch = []
+    if s.get("hi20") and s.get("lo20"):
+        watch.append(f"최근 20일 고점 {fmt_price(s['hi20'])}원 돌파 여부")
+        watch.append(f"최근 20일 저점 {fmt_price(s['lo20'])}원 지지 여부")
+    if ma60 and c < ma60:
+        watch.append(f"60일 평균선 {fmt_price(ma60)}원 회복 여부")
+    if s.get("news"):
+        watch.append("최근 뉴스 흐름과 거래량 변화")
+    return {"head": head, "points": pts, "watch": watch[:3]}
 
 
 # ════════════════════════ 3. 차트 (서버에서 SVG로 그림) ════════════════════════
@@ -499,6 +632,7 @@ def build(stocks, base_date):
             near = mk[max(0, i - 6): i] + mk[i + 1: i + 7]
             peers += [p for p in near if p not in peers][: 8 - len(peers)]
         try:
+            s["comment"] = ai_comment(s)
             write(f"stock/{s['code']}/index.html", "stock.html", s=s, peers=peers,
                   summary=summary(s), faqs=faqs(s), rank=rank[s["code"]] + 1, total=len(stocks),
                   sector_slug=slug(s["sector"]) if s["sector"] and len(by_sector.get(s["sector"], [])) >= 3 else None)
